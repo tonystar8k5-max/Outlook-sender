@@ -14,7 +14,7 @@ async function startServer() {
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-  const PORT = 3000;
+  const PORT = process.env.PORT || 3000;
 
   function processSpintax(text: string): string {
     return text.replace(/{([^{}]+)}/g, (match, options) => {
