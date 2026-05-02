@@ -29,7 +29,8 @@ import {
   History,
   MoveHorizontal,
   Copy,
-  Lock
+  Lock,
+  RotateCcw
 } from 'lucide-react';
 import { toPng, toJpeg } from 'html-to-image';
 import { jsPDF } from 'jspdf';
@@ -134,6 +135,11 @@ export default function App() {
   }, []);
 
   const [threads, setThreads] = useState(1);
+  const [delay, setDelay] = useState(200);
+  
+  // Stats tracking
+  const [successCount, setSuccessCount] = useState(0);
+  const [failureCount, setFailureCount] = useState(0);
   
   const [htmlToConvert, setHtmlToConvert] = useState('');
   const [conversionFormat, setConversionFormat] = useState<'PDF' | 'JPG' | 'PNG' | 'INLINE_PNG' | 'HTML' | 'NON_SELECT_PDF' | 'HQ_IMAGE_FILE'>('PDF');
@@ -645,6 +651,11 @@ export default function App() {
         }]);
 
         try {
+          // Implement delay between sends
+          if (i > 0 && delay > 0) {
+            await new Promise(resolve => setTimeout(resolve, delay));
+          }
+
           const response = await fetch(getApiUrl('/api/send-one'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -671,11 +682,13 @@ export default function App() {
           ));
 
           if (data.success) {
+            setSuccessCount(prev => prev + 1);
             sentSuccessfully = true;
             // Success! Move to next account for next recipient
             accountPointer++;
             setProgress(prev => ({ ...prev, current: i + 1 }));
           } else {
+            setFailureCount(prev => prev + 1);
             // Failure on this account. Try next account for same recipient.
             accountPointer++;
             attemptsForThisRecipient++;
@@ -783,7 +796,7 @@ export default function App() {
   };
 
   return (
-    <div className="w-screen h-screen flex items-center justify-center bg-black overflow-hidden p-4">
+    <div className="w-screen h-screen flex items-center justify-center bg-[#050505] overflow-hidden">
       {/* [SYSTEM] CONVERSION SANDBOX - Absolutely positioned out of viewport to prevent layout shift */}
       <div 
         style={{ 
@@ -799,7 +812,7 @@ export default function App() {
       </div>
 
       <div 
-        style={{ width: '1183px', height: '830px', minWidth: '1183px', maxWidth: '1183px', minHeight: '830px', maxHeight: '830px' }} 
+        style={{ width: '1184px', height: '871px', minWidth: '1184px', maxWidth: '1184px', minHeight: '871px', maxHeight: '871px' }} 
         className="flex flex-col bg-[#0a0a0a] text-[#f0f0f0] font-sans text-[11px] overflow-hidden select-none border border-[#2a2a2a] relative shadow-2xl flex-shrink-0"
       >
       {/* Precision HUD Overlays */}
@@ -810,15 +823,13 @@ export default function App() {
       <div className="flex h-12 items-stretch bg-[#111] border-b border-[#222] shrink-0 shadow-2xl z-50">
         <div className="flex items-center px-6 gap-3 border-r border-[#222] select-none bg-[#141414]">
           <motion.div 
-            animate={{ rotate: [0, 90, 180, 270, 360] }}
-            transition={{ duration: 30, repeat: Infinity, ease: "linear" }}
-            className="w-7 h-7 flex items-center justify-center bg-blue-600/10 rounded-sm border border-blue-600/30 shadow-[0_0_15px_rgba(37,99,235,0.2)]"
+            className="w-8 h-8 flex items-center justify-center bg-transparent rounded-sm overflow-hidden"
           >
-            <Mail size={14} className="text-blue-500" />
+            <img src="https://raw.githubusercontent.com/tonystar8k5-max/NexaMailer-image-icon-/refs/heads/main/NexaMailer-removebg.ico" className="w-full h-full object-contain" referrerPolicy="no-referrer" />
           </motion.div>
           <div className="flex flex-col leading-none">
-            <span className="font-black text-[11px] tracking-tight text-white uppercase italic">SENDER·PRO</span>
-            <span className="text-[7.5px] font-black text-blue-500/60 uppercase tracking-[0.2em] mt-1 italic opacity-80">X-PROTOCOL v5.2</span>
+            <span className="font-black text-[11px] tracking-tight text-white uppercase italic">NEXA·OUTLOOK</span>
+            <span className="text-[7.5px] font-black text-blue-500/60 uppercase tracking-[0.2em] mt-1 italic opacity-80">VERSION 0.1</span>
           </div>
         </div>
 
@@ -905,25 +916,67 @@ export default function App() {
                     className="w-full h-10 px-4 bg-[#0a0a0a] border border-[#222] focus:border-blue-500/40 outline-none font-mono text-blue-400 italic shadow-inner text-[10px] placeholder:opacity-10 transition-all rounded-sm"
                   />
                 </div>
-
-                <div className="flex flex-col flex-1 min-h-0">
-                  <div className="flex items-center justify-between mb-1.5 px-1 shrink-0">
-                    <span className="text-[9px] font-black uppercase tracking-[0.3em] text-blue-500/60 flex items-center gap-2">
-                      <FileDigit size={11} /> Payload Body Protocol
-                    </span>
-                    <div className="flex gap-4">
-                      <button onClick={() => setShowTagsModal(true)} className="text-[7.5px] font-black uppercase text-blue-400 hover:text-white transition-colors bg-blue-500/5 px-3 py-1 border border-blue-500/10 rounded-sm">Variable Registry</button>
+                <div className="flex flex-col flex-1 min-h-0 gap-3">
+                  <div className="flex flex-col flex-1 min-h-0">
+                    <div className="flex items-center justify-between mb-1 px-1 shrink-0">
+                      <span className="text-[9px] font-black uppercase tracking-[0.3em] text-blue-500/60 flex items-center gap-2">
+                        <FileDigit size={11} /> Body Matrix
+                      </span>
+                      <button onClick={() => setShowTagsModal(true)} className="text-[7px] font-black uppercase text-blue-400 hover:text-white transition-colors bg-blue-500/5 px-2 py-0.5 border border-blue-500/10 rounded-sm">Variables</button>
                     </div>
+                    <textarea 
+                      value={body}
+                      onChange={(e) => setBody(e.target.value)}
+                      placeholder="INJECT RAWS TEXT PAYLOAD BODY..."
+                      className="w-full flex-1 p-3 bg-[#0a0a0a] border border-[#222] focus:border-blue-500/40 transition-all shadow-inner font-mono text-[10px] text-slate-400 custom-scrollbar outline-none placeholder:opacity-5 resize-none selection:bg-blue-600/30 rounded-sm"
+                    />
                   </div>
-                  <textarea 
-                    value={body}
-                    onChange={(e) => setBody(e.target.value)}
-                    placeholder="INJECT HTML OR RAW TEXT PAYLOAD BODY..."
-                    className="w-full flex-1 p-4 bg-[#0a0a0a] border border-[#222] focus:border-blue-500/40 transition-all shadow-inner font-mono text-[10px] text-slate-400 custom-scrollbar outline-none placeholder:opacity-5 resize-none selection:bg-blue-600/30 rounded-sm"
-                  />
+
+                  <div className="flex flex-col h-[140px] shrink-0">
+                    <div className="flex items-center justify-between mb-1 px-1 shrink-0">
+                      <span className="text-[9px] font-black uppercase tracking-[0.3em] text-cyan-500/60 flex items-center gap-2">
+                        <Code2 size={11} /> HTML Source Vector
+                      </span>
+                      {htmlToConvert && (
+                        <button 
+                          onClick={() => setHtmlToConvert('')}
+                          className="text-[7.5px] font-black uppercase text-red-500 hover:text-white transition-colors bg-red-500/5 px-3 py-0.5 border border-red-500/10 rounded-sm"
+                        >
+                          Reset
+                        </button>
+                      )}
+                    </div>
+                    <textarea 
+                      value={htmlToConvert}
+                      onChange={(e) => setHtmlToConvert(e.target.value)}
+                      placeholder="ENTER HTML SOURCE FOR ATTACHMENT CONVERSION..."
+                      className="w-full h-full p-3 bg-[#0a0a0a] border border-[#222] focus:border-blue-500/40 transition-all shadow-inner font-mono text-[10px] text-blue-400 custom-scrollbar outline-none placeholder:opacity-5 resize-none selection:bg-blue-600/30 rounded-sm"
+                    />
+                  </div>
                 </div>
 
-                <div className="shrink-0 flex flex-col gap-4 border-t border-[#222]/30 pt-4">
+                <div className="shrink-0 flex flex-col gap-3 pt-3 border-t border-[#222]/30">
+                   <div className="grid grid-cols-2 gap-3">
+                      <div className="flex flex-col gap-1">
+                        <span className="text-[7.5px] font-black uppercase text-blue-500/40 tracking-widest block pl-1">Delay (MS)</span>
+                        <input 
+                          type="number" 
+                          value={delay} 
+                          onChange={(e) => setDelay(Number(e.target.value))}
+                          className="w-full bg-[#050505] border border-[#222] px-3 py-2 text-center font-mono focus:border-blue-500/50 outline-none text-[10px] text-blue-400 shadow-inner rounded-sm" 
+                        />
+                      </div>
+                      <div className="flex flex-col gap-1">
+                        <span className="text-[7.5px] font-black uppercase text-blue-500/40 tracking-widest block pl-1">Threads</span>
+                        <input 
+                          type="number" 
+                          value={threads} 
+                          onChange={(e) => setThreads(Number(e.target.value))}
+                          className="w-full bg-[#050505] border border-[#222] px-3 py-2 text-center font-mono focus:border-blue-500/50 outline-none text-[10px] text-blue-400 shadow-inner rounded-sm" 
+                        />
+                      </div>
+                   </div>
+
                    <div className="flex gap-6">
                       <div className="flex-1 flex flex-col">
                         <div className="flex items-center justify-between mb-2 px-1">
@@ -1059,22 +1112,8 @@ export default function App() {
                       </div>
                     </div>
 
-                    {/* Phase 3: External Data Injection */}
+                    {/* Phase 3: External Data Injection - BUTTON REMOVED PER USER REQUEST */}
                     <div className="flex flex-col gap-2 pt-2 shrink-0 border-t border-[#222]">
-                      <div className="flex items-center gap-2">
-                        {importedPath ? (
-                          <div className="flex-1 bg-blue-500/5 border border-blue-500/10 text-slate-500 py-3.5 px-3 text-[10px] font-black uppercase tracking-[0.2em] rounded-sm cursor-not-allowed text-center flex items-center justify-center gap-2 border-dashed">
-                            <Lock size={12} className="text-blue-500/30" /> Clear Active Source to Re-Import
-                          </div>
-                        ) : (
-                          <label className="flex-1 bg-blue-600/10 border border-blue-500/20 hover:bg-blue-600/20 text-blue-400 py-3.5 px-3 text-[10px] font-black uppercase tracking-widest rounded-sm transition-all cursor-pointer text-center group active:scale-[0.98]">
-                            <div className="flex items-center justify-center gap-2">
-                              <Code2 size={14} /> Import HTML Source
-                            </div>
-                            <input type="file" accept=".html,.htm" className="hidden" onChange={handleHtmlFileImport} />
-                          </label>
-                        )}
-                      </div>
                       {/* Fixed Height Slot for File Info to prevent layout jumping */}
                       <div className="h-[52px] relative flex items-center mt-1 overflow-hidden">
                         <AnimatePresence mode="popLayout">
@@ -1114,25 +1153,6 @@ export default function App() {
                   </div>
                 </div>
 
-                <div className="bg-[#111] border border-[#222] p-5 flex flex-col gap-4 rounded-sm shadow-md shrink-0">
-                   <h3 className="text-blue-500 font-black text-[9px] uppercase tracking-[0.4em] flex items-center gap-3">
-                    <div className="w-6 h-[1px] bg-blue-500/30" /> Logistics
-                  </h3>
-                  <div className="grid grid-cols-2 gap-4">
-                    <div className="space-y-1.5">
-                      <span className="text-[7.5px] font-black uppercase text-slate-600 tracking-widest block pl-1">Delay (MS)</span>
-                      <input type="number" defaultValue={200} className="w-full bg-black border border-[#222] px-3 py-2.5 text-center font-mono focus:border-blue-500/50 outline-none text-[10px] text-blue-400 shadow-inner rounded-sm" />
-                    </div>
-                    <div className="space-y-1.5">
-                      <span className="text-[7.5px] font-black uppercase text-slate-600 tracking-widest block pl-1">Threads</span>
-                      <input type="number" defaultValue={10} className="w-full bg-black border border-[#222] px-3 py-2.5 text-center font-mono focus:border-blue-500/50 outline-none text-[10px] text-blue-400 shadow-inner rounded-sm" />
-                    </div>
-                  </div>
-                </div>
-
-                <div className="flex-1 flex flex-col gap-4 justify-end">
-                   {/* INITIATE BLAST REMOVED PER USER REQUEST */}
-                </div>
               </div>
             </motion.div>
           )}
@@ -1535,14 +1555,14 @@ export default function App() {
       {/* Global Precision Footer */}
       <footer className="h-9 bg-[#0d0d0d] border-t border-[#222] px-8 flex items-center justify-between text-[8.5px] font-black uppercase tracking-[0.4em] z-50">
         <div className="flex gap-12 text-slate-500 italic">
-          <span className="flex items-center gap-3">Target Protocol: <span className="text-blue-500 italic">MS-GRAPH-V5.2</span></span>
+          <span className="flex items-center gap-3">Target Protocol: <span className="text-blue-500 italic">NEXA-OUTLOOK-V0.1</span></span>
           <span className="flex items-center gap-3">Cryptographic Layer: <span className="text-green-500">AES-256·ONLINE</span></span>
           <span className="flex items-center gap-3 opacity-30">Nodes: <span className="text-white">{accounts.length}</span></span>
         </div>
         <div className="flex items-center gap-8">
           <div className="flex items-center gap-2 px-3 py-1 bg-green-500/5 border border-green-500/10 rounded-sm">
              <div className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse shadow-[0_0_10px_#22c55e]" />
-             <span className="text-green-500 font-bold opacity-80 italic">X-Protocol Optimal</span>
+             <span className="text-green-500 font-bold opacity-80 italic">Nexa Optimal</span>
           </div>
           <span className="text-slate-600 font-mono tracking-widest">TS: {new Date().toLocaleTimeString()}</span>
         </div>
@@ -1889,7 +1909,55 @@ export default function App() {
         />
       </div>
       </div>
+
+      {/* ACCURATE INTEGRATED STATS BAR (1184x44px) */}
+      <div className="h-[44px] w-full bg-[#050505] border-t border-[#222] px-6 flex items-center justify-between font-mono shrink-0">
+        <div className="flex items-center gap-6">
+          <div className="flex items-center gap-2">
+            <span className="text-[9px] text-slate-500 uppercase font-black tracking-tighter">Nodes:</span>
+            <span className="text-[11px] text-blue-400 font-bold">{accounts.length}</span>
+          </div>
+          <div className="w-[1px] h-3 bg-[#222]" />
+          <div className="flex items-center gap-2">
+            <span className="text-[9px] text-slate-500 uppercase font-black tracking-tighter">Endpoints:</span>
+            <span className="text-[11px] text-slate-300 font-bold">{recipients.length}</span>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-8">
+          <div className="flex items-center gap-2">
+            <span className="text-[9px] text-green-500/70 uppercase font-black tracking-tighter">Success:</span>
+            <span className="text-[11px] text-green-400 font-bold">{successCount}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-[9px] text-red-500/70 uppercase font-black tracking-tighter">Failed:</span>
+            <span className="text-[11px] text-red-500 font-bold">{failureCount}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-[9px] text-blue-500/70 uppercase font-black tracking-tighter">Progress:</span>
+            <span className="text-[11px] text-blue-400 font-bold">
+              {recipients.length > 0 ? Math.round(((successCount + failureCount) / recipients.length) * 100) : 0}%
+            </span>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-4">
+           {isSending ? (
+             <span className="text-[9px] font-black uppercase text-blue-500 animate-pulse tracking-widest">Active</span>
+           ) : (
+             <span className="text-[9px] font-black uppercase text-slate-600 tracking-widest">Idle</span>
+           )}
+           <button 
+             onClick={() => { setSuccessCount(0); setFailureCount(0); }}
+             className="text-slate-600 hover:text-red-500 transition-colors p-1"
+             title="Reset"
+           >
+             <RotateCcw size={12} />
+           </button>
+        </div>
+      </div>
+
+      </div>
     </div>
-  </div>
-);
+  );
 }

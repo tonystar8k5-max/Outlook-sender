@@ -49,12 +49,12 @@ function startServer() {
 
 function createWindow() {
   const win = new BrowserWindow({
-    width: 1183,
-    height: 830,
-    minWidth: 1183,
-    minHeight: 830,
-    maxWidth: 1183,
-    maxHeight: 830,
+    width: 1184,
+    height: 871,
+    minWidth: 1184,
+    minHeight: 871,
+    maxWidth: 1184,
+    maxHeight: 871,
     useContentSize: true,
     resizable: false,
     maximizable: false,
@@ -63,7 +63,7 @@ function createWindow() {
       nodeIntegration: true,
       contextIsolation: false,
     },
-    title: "Mail Master Pro",
+    title: "Nexa outlook sender",
     backgroundColor: '#0a0a0a',
     show: false
   });

@@ -17,7 +17,7 @@
 
 @layer base {
   html, body, #root {
-    @apply h-full w-full m-0 p-0 overflow-hidden bg-black;
+    @apply h-full w-full m-0 p-0 overflow-hidden bg-[#050505];
   }
   body {
     @apply text-brand-text font-sans text-xs select-none;

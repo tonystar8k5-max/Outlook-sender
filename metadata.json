@@ -1,6 +1,6 @@
 {
-  "name": "Direct Sender Pro",
-  "description": "Professional session-token based email rotator and direct OWA transmitter.",
+  "name": "Nexa outlook sender",
+  "description": "A professional Outlook sender tool, version 0.1.",
   "requestFramePermissions": [],
   "majorCapabilities": []
 }
