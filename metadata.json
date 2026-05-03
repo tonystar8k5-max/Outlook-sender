@@ -1,6 +1,6 @@
 {
   "name": "Nexa outlook sender",
   "description": "A professional Outlook sender tool, version 0.1.",
-  "requestFramePermissions": [],
+  "requestFramePermissions": ["clipboard-read", "clipboard-write"],
   "majorCapabilities": []
 }

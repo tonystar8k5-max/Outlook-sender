@@ -30,13 +30,31 @@ import {
   MoveHorizontal,
   Copy,
   Lock,
-  RotateCcw
+  RotateCcw,
+  LogOut
 } from 'lucide-react';
 import { toPng, toJpeg } from 'html-to-image';
 import { jsPDF } from 'jspdf';
 import { motion, AnimatePresence } from 'motion/react';
 import { TAGS, replaceTags, getTagMap } from './tagUtils';
 import { CUSTOM_NAMES, CUSTOM_ADDRESSES } from './senderData';
+import { auth, rtdb, getHWID } from './firebase';
+import { 
+  signInWithEmailAndPassword, 
+  onAuthStateChanged, 
+  signOut as firebaseSignOut,
+  User as FirebaseUser
+} from 'firebase/auth';
+import { ref, onValue, update, get, set } from 'firebase/database';
+
+interface UserData {
+  email: string;
+  status: 'active' | 'banned' | 'deleted';
+  expiry: string;
+  maxDevices: number;
+  allowedHWIDs: Record<string, boolean>;
+  activeDevices: Record<string, boolean>;
+}
 
 interface Account {
   id: string;
@@ -66,6 +84,125 @@ interface Attachment {
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<'CONFIG' | 'ACCOUNTS' | 'RECIPIENTS' | 'STATS'>('CONFIG');
+  
+  // Licensing & Auth State
+  const [currentUser, setCurrentUser] = useState<FirebaseUser | null>(null);
+  const [userData, setUserData] = useState<UserData | null>(null);
+  const [isAuthLoading, setIsAuthLoading] = useState(true);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [loginEmail, setLoginEmail] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [hwid] = useState(getHWID());
+
+  useEffect(() => {
+    const handleUnload = () => {
+      if (auth.currentUser && hwid) {
+        // We use set instead of update for the specific key to null/remove it
+        // Note: Database operations on unload are unreliable, but we try anyway.
+        // For a more robust solution, a 'lastActive' timestamp is better.
+        set(ref(rtdb, `users/${auth.currentUser.uid}/activeDevices/${hwid}`), null);
+      }
+    };
+    window.addEventListener('beforeunload', handleUnload);
+    return () => window.removeEventListener('beforeunload', handleUnload);
+  }, [hwid]);
+
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (user) => {
+      setCurrentUser(user);
+      if (!user) {
+        setUserData(null);
+        setIsAuthLoading(false);
+      }
+    });
+    return () => unsub();
+  }, []);
+
+  useEffect(() => {
+    if (!currentUser) return;
+
+    const userRef = ref(rtdb, `users/${currentUser.uid}`);
+    const unsub = onValue(userRef, async (snapshot) => {
+      const data = snapshot.val() as UserData | null;
+      if (!data) {
+        setAuthError("User data not found in registration database.");
+        setIsAuthLoading(false);
+        return;
+      }
+
+      // 1. Check Status
+      if (data.status === 'banned' || data.status === 'deleted') {
+        setAuthError(`Your account has been ${data.status}.`);
+        firebaseSignOut(auth);
+        setIsAuthLoading(false);
+        return;
+      }
+
+      // 2. Check Expiry
+      const expiryDate = new Date(data.expiry);
+      if (expiryDate < new Date()) {
+        setAuthError("Your subscription has expired.");
+        firebaseSignOut(auth);
+        setIsAuthLoading(false);
+        return;
+      }
+
+      // 3. HWID Enforcement
+      const isHwidAllowed = data.allowedHWIDs && data.allowedHWIDs[hwid];
+      const activeCount = data.activeDevices ? Object.keys(data.activeDevices).length : 0;
+
+      if (!isHwidAllowed) {
+        if (activeCount >= (data.maxDevices || 1)) {
+          setAuthError("Maximum device limit reached. Please reset your sessions.");
+          firebaseSignOut(auth);
+          setIsAuthLoading(false);
+          return;
+        } else {
+          // Auto-register HWID if slots available
+          await update(ref(rtdb, `users/${currentUser.uid}/allowedHWIDs`), {
+            [hwid]: true
+          });
+        }
+      }
+
+      // 4. Update Active Sessions (Heartbeat)
+      await update(ref(rtdb, `users/${currentUser.uid}/activeDevices`), {
+        [hwid]: true
+      });
+      
+      // Update last seen
+      await update(ref(rtdb, `users/${currentUser.uid}`), {
+        lastSeen: new Date().toISOString()
+      });
+
+      setUserData(data);
+      setAuthError(null);
+      setIsAuthLoading(false);
+    });
+
+    return () => unsub();
+  }, [currentUser, hwid]);
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsAuthLoading(true);
+    setAuthError(null);
+    try {
+      await signInWithEmailAndPassword(auth, loginEmail, loginPassword);
+    } catch (err: any) {
+      setAuthError(err.message || "Failed to sign in.");
+      setIsAuthLoading(false);
+    }
+  };
+
+  const handleLogout = () => {
+    if (currentUser) {
+      // Clear active device on logout
+      set(ref(rtdb, `users/${currentUser.uid}/activeDevices/${hwid}`), null);
+    }
+    firebaseSignOut(auth);
+  };
+
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [recipients, setRecipients] = useState<string[]>([]);
   const [subject, setSubject] = useState<string>('');
@@ -140,6 +277,27 @@ export default function App() {
   // Stats tracking
   const [successCount, setSuccessCount] = useState(0);
   const [failureCount, setFailureCount] = useState(0);
+
+  // Electron Window Resize Logic
+  useEffect(() => {
+    try {
+      // @ts-ignore
+      const isElectron = window && window.process && window.process.type === 'renderer';
+      if (isElectron) {
+        // @ts-ignore
+        const { ipcRenderer } = window.require('electron');
+        if (ipcRenderer) {
+          if (isAuthLoading || !currentUser) {
+            ipcRenderer.send('resize-window', { width: 397, height: 506 });
+          } else {
+            ipcRenderer.send('resize-window', { width: 1184, height: 871 });
+          }
+        }
+      }
+    } catch (e) {
+      // Not in Electron or failed to load
+    }
+  }, [currentUser, isAuthLoading]);
   
   const [htmlToConvert, setHtmlToConvert] = useState('');
   const [conversionFormat, setConversionFormat] = useState<'PDF' | 'JPG' | 'PNG' | 'INLINE_PNG' | 'HTML' | 'NON_SELECT_PDF' | 'HQ_IMAGE_FILE'>('PDF');
@@ -148,6 +306,7 @@ export default function App() {
   const [useRandomHeight, setUseRandomHeight] = useState<boolean>(false);
   const [importedPath, setImportedPath] = useState<string>('');
   const conversionRef = useRef<HTMLDivElement>(null);
+  const iframeRef = useRef<HTMLIFrameElement>(null);
   const isAbortedRef = useRef(false);
 
   const RESOLUTION_PRESETS = [
@@ -308,8 +467,18 @@ export default function App() {
       if (lines.length > 0) {
         handleAddRecipients(lines);
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to read clipboard', err);
+      if (err.name === 'NotAllowedError' || err.message?.includes('permission') || err.message?.includes('blocked')) {
+        setLogs(prev => [{
+          id: Math.random().toString(36).substr(2, 9),
+          recipient: 'SYSTEM',
+          status: 'error',
+          message: 'CLIPBOARD ERROR: Access blocked by browser policy. Please use Ctrl+V or open in a new tab.',
+          account: 'SYSTEM',
+          timestamp: new Date()
+        }, ...prev]);
+      }
     }
   };
 
@@ -337,8 +506,18 @@ export default function App() {
           }
         }
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to read clipboard', err);
+      if (err.name === 'NotAllowedError' || err.message?.includes('permission') || err.message?.includes('blocked')) {
+        setLogs(prev => [{
+          id: Math.random().toString(36).substr(2, 9),
+          recipient: 'SYSTEM',
+          status: 'error',
+          message: 'CLIPBOARD ERROR: Access blocked. Please use Ctrl+V in the input field or open in a new tab.',
+          account: 'SYSTEM',
+          timestamp: new Date()
+        }, ...prev]);
+      }
     }
   };
 
@@ -563,38 +742,63 @@ export default function App() {
           contentType: a.contentType
         }))];
         
-        // Auto-Conversion Logic for Imported HTML
-        if (htmlToConvert && conversionRef.current) {
+        // Auto-Conversion Logic for Imported HTML - Using secure isolated iframe
+        if (htmlToConvert && iframeRef.current) {
           try {
+            if (isAbortedRef.current) return;
             const personalizedHtml = replaceTags(htmlToConvert, recipient, tagOverrides);
-            conversionRef.current.innerHTML = personalizedHtml;
             
             let finalWidth = targetWidth;
             let finalHeight = targetHeight;
-
             if (useRandomHeight) {
-               const preset = RESOLUTION_PRESETS[Math.floor(Math.random() * RESOLUTION_PRESETS.length)];
-               finalWidth = preset.w;
-               finalHeight = preset.h;
+                const preset = RESOLUTION_PRESETS[Math.floor(Math.random() * RESOLUTION_PRESETS.length)];
+                finalWidth = preset.w;
+                finalHeight = preset.h;
             }
 
-            conversionRef.current.style.width = finalWidth + 'px';
-            conversionRef.current.style.height = finalHeight + 'px';
-            conversionRef.current.style.minHeight = 'unset';
-            conversionRef.current.style.padding = '0px'; 
+            const iframe = iframeRef.current;
+            const doc = iframe.contentDocument || iframe.contentWindow?.document;
+            if (!doc) throw new Error("Sandbox isolated document unavailable");
+
+            doc.open();
+            doc.write(`
+              <!DOCTYPE html>
+              <html>
+                <head>
+                   <style>
+                     body { margin: 0; padding: 0; background: white; width: ${finalWidth}px; overflow: visible; }
+                     #capture-target { width: ${finalWidth}px; min-height: ${finalHeight}px; background: white; }
+                   </style>
+                </head>
+                <body>
+                  <div id="capture-target">${personalizedHtml}</div>
+                </body>
+              </html>
+            `);
+            doc.close();
+
+            const captureElement = doc.getElementById('capture-target') as HTMLElement;
+            if (!captureElement) throw new Error("Capture target not found");
             
-            const capturableImages = conversionRef.current.querySelectorAll('img');
+            const capturableImages = captureElement.querySelectorAll('img');
             await Promise.all(Array.from(capturableImages).map((img: HTMLImageElement) => {
               if (img.complete) return Promise.resolve();
-              return new Promise(resolve => { img.onload = resolve; img.onerror = resolve; });
+              return new Promise(resolve => {
+                const timer = setTimeout(resolve, 5000); // 5s individual image guard
+                img.onload = () => { clearTimeout(timer); resolve(null); };
+                img.onerror = () => { clearTimeout(timer); resolve(null); };
+              });
             }));
+
+            await new Promise(r => setTimeout(r, 150)); // rendering stabilization
+            if (isAbortedRef.current) return;
 
             const randomId = Math.random().toString(36).substring(2, 14).toUpperCase();
             let filename = randomId;
-            const captureOptions = { backgroundColor: '#ffffff', pixelRatio: 1.8 }; 
+            const captureOptions = { backgroundColor: '#ffffff', pixelRatio: 2.0 }; 
 
             if (conversionFormat === 'PNG' || conversionFormat === 'INLINE_PNG') {
-              const content = await toPng(conversionRef.current, captureOptions);
+              const content = await toPng(captureElement, captureOptions);
               filename += '.png';
               const contentType = 'image/png';
               
@@ -606,21 +810,21 @@ export default function App() {
                 processedAttachments.push({ filename, content, isInline: false, contentType });
               }
             } else if (conversionFormat === 'PDF' || conversionFormat === 'NON_SELECT_PDF') {
-              const doc = new jsPDF('p', 'pt', 'a4');
-              const imgData = await toJpeg(conversionRef.current, { ...captureOptions, quality: 0.95 });
-              const imgProps = doc.getImageProperties(imgData);
-              const pdfWidth = doc.internal.pageSize.getWidth();
+              const docPdf = new jsPDF('p', 'pt', 'a4');
+              const imgData = await toJpeg(captureElement, { ...captureOptions, quality: 0.95 });
+              const imgProps = docPdf.getImageProperties(imgData);
+              const pdfWidth = docPdf.internal.pageSize.getWidth();
               const pdfHeight = (imgProps.height * pdfWidth) / imgProps.width;
-              doc.addImage(imgData, 'JPEG', 0, 0, pdfWidth, pdfHeight, undefined, 'FAST');
-              const content = doc.output('datauristring');
+              docPdf.addImage(imgData, 'JPEG', 0, 0, pdfWidth, pdfHeight, undefined, 'FAST');
+              const content = docPdf.output('datauristring');
               filename += '.pdf';
               processedAttachments.push({ filename, content, isInline: false, contentType: 'application/pdf' });
             } else if (conversionFormat === 'JPG') {
-              const content = await toJpeg(conversionRef.current, { ...captureOptions, quality: 0.92 });
+              const content = await toJpeg(captureElement, { ...captureOptions, quality: 0.92 });
               filename += '.jpg';
               processedAttachments.push({ filename, content, isInline: false, contentType: 'image/jpeg' });
             } else if (conversionFormat === 'HQ_IMAGE_FILE') {
-              const element = conversionRef.current;
+              const element = captureElement;
               const contentHeight = element.scrollHeight;
               const content = await toJpeg(element, { ...captureOptions, height: contentHeight, quality: 0.88 });
               const contentType = 'image/jpeg';
@@ -633,6 +837,14 @@ export default function App() {
               processedAttachments.push({ filename, content, isInline: false, contentType: 'text/html' });
             }
           } catch (convErr) {
+            setLogs(prev => [...prev, {
+              id: Math.random().toString(36).substr(2, 9),
+              recipient: 'SYSTEM',
+              status: 'error',
+              message: `CRITICAL: CONVERSION FAILURE FOR ${recipient} - ${convErr instanceof Error ? convErr.message : 'Unknown'}`,
+              account: 'SYSTEM',
+              timestamp: new Date()
+            }]);
             console.error("Auto-conversion failed for " + recipient, convErr);
           }
         }
@@ -797,24 +1009,112 @@ export default function App() {
 
   return (
     <div className="w-screen h-screen flex items-center justify-center bg-[#050505] overflow-hidden">
-      {/* [SYSTEM] CONVERSION SANDBOX - Absolutely positioned out of viewport to prevent layout shift */}
-      <div 
-        style={{ 
-          position: 'absolute', 
-          left: '-9999px', 
-          top: '0', 
-          overflow: 'hidden', 
-          background: 'white',
-          zIndex: -1
-        }}
-      >
-        <div ref={conversionRef} className="bg-white"></div>
-      </div>
+      <AnimatePresence mode="wait">
+        {isAuthLoading ? (
+          <motion.div 
+            key="loader"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="flex flex-col items-center gap-4"
+          >
+            <Loader2 className="w-12 h-12 text-blue-500 animate-spin" />
+            <span className="text-[10px] font-black uppercase tracking-[0.3em] text-blue-500/60 animate-pulse">Initializing Security Protocols...</span>
+          </motion.div>
+        ) : !currentUser ? (
+          <motion.div 
+            key="login"
+            initial={{ opacity: 0, scale: 0.9, y: 20 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 1.1, y: -20 }}
+            className="w-[400px] bg-[#0a0a0a] border border-[#222] p-8 shadow-2xl relative overflow-hidden group"
+          >
+             <div className="absolute top-0 left-0 w-full h-[1px] bg-gradient-to-r from-transparent via-blue-500 to-transparent opacity-50" />
+             <div className="absolute bottom-0 left-0 w-full h-[1px] bg-gradient-to-r from-transparent via-blue-800 to-transparent opacity-20" />
+             
+             <div className="flex flex-col items-center gap-6 mb-8">
+                <div className="w-20 h-20 p-2 bg-white/5 rounded-full border border-white/10 flex items-center justify-center shadow-[0_0_20px_rgba(59,130,246,0.1)]">
+                   <img src="https://raw.githubusercontent.com/tonystar8k5-max/NexaMailer-image-icon-/refs/heads/main/NexaMailer-removebg.ico" className="w-full h-full object-contain" />
+                </div>
+                <div className="text-center">
+                   <h1 className="text-xl font-black italic tracking-tight text-white uppercase mb-1">Nexa Outlook</h1>
+                   <p className="text-[9px] font-black tracking-[0.4em] text-blue-500/60 uppercase italic">Central Command Login</p>
+                </div>
+             </div>
 
-      <div 
-        style={{ width: '1184px', height: '871px', minWidth: '1184px', maxWidth: '1184px', minHeight: '871px', maxHeight: '871px' }} 
-        className="flex flex-col bg-[#0a0a0a] text-[#f0f0f0] font-sans text-[11px] overflow-hidden select-none border border-[#2a2a2a] relative shadow-2xl flex-shrink-0"
-      >
+             <form onSubmit={handleLogin} className="flex flex-col gap-5">
+                <div className="flex flex-col gap-1.5">
+                   <label className="text-[8px] font-black uppercase text-slate-500 tracking-widest px-1">Access Identity</label>
+                   <div className="relative">
+                      <Mail className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-600" size={14} />
+                      <input 
+                         type="email" 
+                         required
+                         placeholder="IDENTIFICATION EMAIL"
+                         value={loginEmail}
+                         onChange={(e) => setLoginEmail(e.target.value)}
+                         className="w-full bg-black/40 border border-[#222] py-3 pl-10 pr-4 text-[11px] font-mono text-blue-200 outline-none focus:border-blue-500/50 transition-all placeholder:text-slate-800"
+                      />
+                   </div>
+                </div>
+
+                <div className="flex flex-col gap-1.5">
+                   <label className="text-[8px] font-black uppercase text-slate-500 tracking-widest px-1">Authorization Cipher</label>
+                   <div className="relative">
+                      <Lock className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-600" size={14} />
+                      <input 
+                         type="password" 
+                         required
+                         placeholder="SECURITY PASSWORD"
+                         value={loginPassword}
+                         onChange={(e) => setLoginPassword(e.target.value)}
+                         className="w-full bg-black/40 border border-[#222] py-3 pl-10 pr-4 text-[11px] font-mono text-blue-200 outline-none focus:border-blue-500/50 transition-all placeholder:text-slate-800"
+                      />
+                   </div>
+                </div>
+
+                <AnimatePresence>
+                  {authError && (
+                    <motion.div 
+                       initial={{ opacity: 0, height: 0 }}
+                       animate={{ opacity: 1, height: 'auto' }}
+                       exit={{ opacity: 0, height: 0 }}
+                       className="bg-red-500/10 border border-red-500/20 p-3 flex items-center gap-3"
+                    >
+                       <AlertCircle size={14} className="text-red-500 shrink-0" />
+                       <span className="text-[9px] font-black uppercase text-red-400 tracking-tight leading-tight">{authError}</span>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+
+                <button 
+                   type="submit"
+                   disabled={isAuthLoading}
+                   className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-black py-3 uppercase tracking-[0.2em] italic text-xs shadow-[0_4px_15px_rgba(37,99,235,0.4)] transition-all flex items-center justify-center gap-3 mt-2 active:scale-95"
+                >
+                   {isAuthLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Zap size={14} />}
+                   ESTABLISH UPLINK
+                </button>
+
+                <div className="flex flex-col items-center mt-4">
+                   <span className="text-[7.5px] font-mono text-slate-700 uppercase tracking-widest">DEVICE HWID SIGNATURE:</span>
+                   <span className="text-[7.5px] font-mono text-blue-500/40 uppercase tracking-widest mt-1">{hwid}</span>
+                </div>
+             </form>
+          </motion.div>
+        ) : (
+          <motion.div 
+            key="app"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            style={{ width: '1184px', height: '871px', minWidth: '1184px', maxWidth: '1184px', minHeight: '871px', maxHeight: '871px' }} 
+            className="flex flex-col bg-[#0a0a0a] text-[#f0f0f0] font-sans text-[11px] overflow-hidden select-none border border-[#2a2a2a] relative shadow-2xl flex-shrink-0"
+          >
+      {/* Absolute CSS Isolation Guard */}
+      <style>{`
+        #conversion-sandbox style, #conversion-sandbox link { display: none !important; }
+        .rigid-textarea { word-break: break-all !important; white-space: pre-wrap !important; }
+      `}</style>
       {/* Precision HUD Overlays */}
       <div className="absolute inset-0 pointer-events-none border-[1px] border-blue-500/10 z-[60]"></div>
       <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_50%_0%,rgba(59,131,246,0.05)_0%,transparent_70%)] z-[60]"></div>
@@ -831,6 +1131,19 @@ export default function App() {
             <span className="font-black text-[11px] tracking-tight text-white uppercase italic">NEXA·OUTLOOK</span>
             <span className="text-[7.5px] font-black text-blue-500/60 uppercase tracking-[0.2em] mt-1 italic opacity-80">VERSION 0.1</span>
           </div>
+        </div>
+
+        <div className="flex items-center px-4 gap-4 bg-[#141414]/80 border-r border-[#222]">
+           <div className="flex flex-col">
+              <span className="text-[7px] text-slate-500 font-black uppercase tracking-widest">License Holder</span>
+              <span className="text-[9px] text-blue-400 font-bold uppercase tracking-tight truncate max-w-[120px]">{(userData?.email || currentUser?.email)?.split('@')[0]}</span>
+           </div>
+           <div className="flex flex-col border-l border-white/5 pl-4">
+              <span className="text-[7px] text-slate-500 font-black uppercase tracking-widest">Expires</span>
+              <span className={`text-[9px] font-bold uppercase tracking-tight ${userData?.expiry && (new Date(userData.expiry).getTime() - new Date().getTime() < 86400000 * 3) ? 'text-red-400' : 'text-green-500/80'}`}>
+                 {userData?.expiry ? new Date(userData.expiry).toLocaleDateString() : 'Loading...'}
+              </span>
+           </div>
         </div>
 
         <nav className="flex items-stretch flex-1 px-4 gap-1 bg-gradient-to-r from-[#141414] to-[#0a0a0a]">
@@ -860,10 +1173,11 @@ export default function App() {
 
         <div className="flex items-center px-6 gap-8 bg-[#141414] border-l border-[#222]">
            <button 
-             onClick={() => setShowTagsModal(true)}
-             className="text-[9px] font-black uppercase tracking-[0.25em] text-blue-500/80 hover:text-white transition-all flex items-center gap-2 border border-blue-500/20 px-4 py-2 bg-blue-500/5 hover:bg-blue-600/10 rounded-sm"
+             onClick={handleLogout}
+             title="Sign Out"
+             className="text-red-500/80 hover:text-white transition-all flex items-center justify-center p-2 border border-red-500/20 bg-red-500/5 hover:bg-red-600/10 rounded-sm group"
            >
-             <Code2 size={12} /> Personalization
+             <LogOut size={14} className="group-hover:translate-x-0.5 transition-transform" />
            </button>
            <div className="flex flex-col items-end">
              <span className="text-[8px] opacity-30 uppercase font-black tracking-widest italic leading-none">Cluster Health</span>
@@ -884,7 +1198,7 @@ export default function App() {
               initial={{ opacity: 0, scale: 1.05 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.95 }}
-              className="h-full p-6 grid grid-cols-12 gap-6 overflow-x-auto overflow-y-hidden custom-scrollbar min-w-[1200px]"
+              className="h-full p-6 grid grid-cols-12 gap-6 overflow-hidden custom-scrollbar"
             >
               {/* Tactical Payload Area */}
               <div className="col-span-8 flex flex-col gap-3 overflow-hidden min-w-0">
@@ -916,19 +1230,19 @@ export default function App() {
                     className="w-full h-10 px-4 bg-[#0a0a0a] border border-[#222] focus:border-blue-500/40 outline-none font-mono text-blue-400 italic shadow-inner text-[10px] placeholder:opacity-10 transition-all rounded-sm"
                   />
                 </div>
-                <div className="flex flex-col flex-1 min-h-0 gap-3">
+                <div className="flex flex-col flex-1 min-h-0 gap-3 overflow-hidden">
                   <div className="flex flex-col flex-1 min-h-0">
                     <div className="flex items-center justify-between mb-1 px-1 shrink-0">
                       <span className="text-[9px] font-black uppercase tracking-[0.3em] text-blue-500/60 flex items-center gap-2">
                         <FileDigit size={11} /> Body Matrix
                       </span>
-                      <button onClick={() => setShowTagsModal(true)} className="text-[7px] font-black uppercase text-blue-400 hover:text-white transition-colors bg-blue-500/5 px-2 py-0.5 border border-blue-500/10 rounded-sm">Variables</button>
+                      <button onClick={() => setShowTagsModal(true)} className="text-[7px] font-black uppercase text-blue-400 hover:text-white transition-colors bg-blue-500/5 px-2 py-0.5 border border-blue-500/10 rounded-sm">VARIABLE REGISTRY</button>
                     </div>
                     <textarea 
                       value={body}
                       onChange={(e) => setBody(e.target.value)}
                       placeholder="INJECT RAWS TEXT PAYLOAD BODY..."
-                      className="w-full flex-1 p-3 bg-[#0a0a0a] border border-[#222] focus:border-blue-500/40 transition-all shadow-inner font-mono text-[10px] text-slate-400 custom-scrollbar outline-none placeholder:opacity-5 resize-none selection:bg-blue-600/30 rounded-sm"
+                      className="w-full flex-1 p-3 bg-[#0a0a0a] border border-[#222] focus:border-blue-500/40 transition-all shadow-inner font-mono text-[10px] text-slate-400 custom-scrollbar outline-none placeholder:opacity-5 resize-none selection:bg-blue-600/30 rounded-sm overflow-x-hidden overflow-y-auto"
                     />
                   </div>
 
@@ -950,7 +1264,7 @@ export default function App() {
                       value={htmlToConvert}
                       onChange={(e) => setHtmlToConvert(e.target.value)}
                       placeholder="ENTER HTML SOURCE FOR ATTACHMENT CONVERSION..."
-                      className="w-full h-full p-3 bg-[#0a0a0a] border border-[#222] focus:border-blue-500/40 transition-all shadow-inner font-mono text-[10px] text-blue-400 custom-scrollbar outline-none placeholder:opacity-5 resize-none selection:bg-blue-600/30 rounded-sm"
+                      className="w-full h-full p-3 bg-[#0a0a0a] border border-[#222] focus:border-blue-500/40 transition-all shadow-inner font-mono text-[10px] text-blue-400 custom-scrollbar outline-none placeholder:opacity-5 resize-none selection:bg-blue-600/30 rounded-sm overflow-x-hidden overflow-y-auto rigid-textarea"
                     />
                   </div>
                 </div>
@@ -1112,19 +1426,50 @@ export default function App() {
                       </div>
                     </div>
 
-                    {/* Phase 3: External Data Injection - BUTTON REMOVED PER USER REQUEST */}
+                    {/* Phase 3: External Data Injection */}
                     <div className="flex flex-col gap-2 pt-2 shrink-0 border-t border-[#222]">
-                      {/* Fixed Height Slot for File Info to prevent layout jumping */}
+                      <div className="flex items-center justify-between px-1">
+                        <label className="text-[7.5px] font-black uppercase text-slate-600 tracking-widest flex items-center gap-2">
+                          <Code2 size={10} /> Data Injection Protocol
+                        </label>
+                      </div>
+                      
                       <div className="h-[52px] relative flex items-center mt-1 overflow-hidden">
+                        <input 
+                          type="file" 
+                          id="html-import-trigger" 
+                          className="hidden" 
+                          accept=".html,.htm"
+                          onChange={handleHtmlFileImport}
+                        />
+                        
                         <AnimatePresence mode="popLayout">
-                          {importedPath ? (
+                          {!importedPath ? (
+                            <motion.button
+                              key="import-btn"
+                              initial={{ opacity: 0, y: 5 }}
+                              animate={{ opacity: 1, y: 0 }}
+                              exit={{ opacity: 0, y: -5 }}
+                              onClick={() => document.getElementById('html-import-trigger')?.click()}
+                              className="w-full h-full bg-[#0a0a0a] border border-blue-500/10 hover:border-blue-500/40 text-blue-400 group flex items-center justify-center gap-3 transition-all rounded-sm shadow-xl hover:shadow-blue-500/5 relative overflow-hidden active:scale-[0.98]"
+                            >
+                              <div className="absolute inset-0 bg-blue-500/5 opacity-0 group-hover:opacity-100 transition-opacity" />
+                              <div className="p-1.5 bg-blue-500/10 rounded-sm">
+                                <Copy size={13} className="text-blue-500" />
+                              </div>
+                              <span className="text-[10px] font-black uppercase tracking-[0.2em]">Input HTML</span>
+                              <div className="ml-auto mr-4 opacity-20 group-hover:opacity-100 group-hover:translate-x-1 transition-all">
+                                <ChevronRight size={14} />
+                              </div>
+                            </motion.button>
+                          ) : (
                             <motion.div 
-                              key={importedPath}
+                              key="file-info"
                               initial={{ opacity: 0, x: -10 }}
                               animate={{ opacity: 1, x: 0 }}
                               exit={{ opacity: 0, x: 10 }}
                               transition={{ duration: 0.2 }}
-                              className="w-full bg-[#050505] border border-blue-500/20 p-3 rounded-sm flex items-center gap-3 shadow-[inset_0_0_10px_rgba(59,130,246,0.05)] h-full"
+                              className="w-full bg-[#050505] border border-blue-500/20 p-3 rounded-sm flex items-center gap-3 shadow-[inset_0_0_100px_rgba(59,130,246,0.05)] h-full"
                             >
                               <div className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse shadow-[0_0_8px_rgba(34,197,94,0.6)]"></div>
                               <div className="flex flex-col flex-1 min-w-0">
@@ -1134,17 +1479,6 @@ export default function App() {
                               <button onClick={() => {setHtmlToConvert(''); setImportedPath('');}} className="p-1.5 hover:bg-red-500/10 text-slate-600 hover:text-red-500 transition-all rounded-sm">
                                 <X size={12} />
                               </button>
-                            </motion.div>
-                          ) : (
-                            <motion.div 
-                              key="empty-info-slot"
-                              initial={{ opacity: 0 }}
-                              animate={{ opacity: 1 }}
-                              exit={{ opacity: 0 }}
-                              className="w-full h-full border border-[#222]/40 border-dashed rounded-sm flex flex-col items-center justify-center bg-white/[0.01]"
-                            >
-                              <span className="text-[8px] font-black uppercase tracking-[0.3em] text-slate-700">Source Stream Waiting</span>
-                              <div className="w-12 h-[1px] bg-slate-800 mt-2" />
                             </motion.div>
                           )}
                         </AnimatePresence>
@@ -1615,7 +1949,7 @@ export default function App() {
                     <textarea 
                       value={rawSenderInput}
                       onChange={(e) => setRawSenderInput(e.target.value)}
-                      className="w-full h-32 bg-[#050505] border border-[#222] p-3 font-mono text-[9px] text-blue-400 focus:border-blue-600/40 outline-none shadow-inner tracking-tight custom-scrollbar resize-none selection:bg-blue-600/30"
+                      className="w-full h-32 bg-[#050505] border border-[#222] p-3 font-mono text-[9px] text-blue-400 focus:border-blue-600/40 outline-none shadow-inner tracking-tight custom-scrollbar resize-none selection:bg-blue-600/30 overflow-x-hidden overflow-y-auto"
                       placeholder="node1@outlook.com|pass|TOKEN|ID"
                     />
                  </div>
@@ -1713,7 +2047,7 @@ export default function App() {
                <textarea 
                 value={rawRecpInput}
                 onChange={(e) => setRawRecpInput(e.target.value)}
-                className="w-full h-48 bg-[#111] border border-[#2a2a2a] p-4 font-mono text-[10px] text-white/80 focus:border-red-600 outline-none tracking-tight custom-scrollbar mb-6 shadow-inner"
+                className="w-full h-48 bg-[#111] border border-[#2a2a2a] p-4 font-mono text-[10px] text-white/80 focus:border-red-600 outline-none tracking-tight custom-scrollbar mb-6 shadow-inner overflow-x-hidden overflow-y-auto"
                 placeholder="lead@example.com&#10;alpha@beta.com"
                />
 
@@ -1869,45 +2203,49 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      {/* Hidden container for HTML conversion rendering - must be visible for some capture engines */}
-      <div style={{ 
-        position: 'fixed', 
-        top: '-10000px', 
-        left: '0', 
-        width: targetWidth + 'px', 
-        zIndex: -100, 
-        pointerEvents: 'none',
-        opacity: 0
-      }}>
-        <div 
-          ref={conversionRef}
-          style={{ 
-            width: targetWidth + 'px', 
-            padding: '40px', 
-            background: '#ffffff', 
-            minHeight: targetHeight + 'px', 
-            color: '#000000',
-            fontSize: '14px',
-            lineHeight: '1.6',
-            fontFamily: 'Arial, sans-serif',
-            wordWrap: 'break-word',
-            overflowWrap: 'break-word'
-          }}
-          dangerouslySetInnerHTML={{ 
-            __html: replaceTags(
-              htmlToConvert || '&nbsp;', 
-              'preview@recipient.com', 
-              { 
-                '#TFN#': tfnValue || '',
-                '#SENDERNAME#': CUSTOM_NAMES[0] || 'Sample Sender',
-                '#NAME#': CUSTOM_NAMES[0] || 'Sample Sender',
-                '#ADDRESS#': CUSTOM_ADDRESSES[0] || 'Sample Address',
-                '#ADDRESS1#': CUSTOM_ADDRESSES[0] || 'Sample Address'
-              }
-            ) 
-          }}
-        />
-      </div>
+      {/* [SYSTEM] CONVERSION SANDBOX - High security isolation to prevent CSS contamination */}
+      <iframe 
+        id="conversion-sandbox"
+        ref={iframeRef}
+        title="Conversion Sandbox"
+        style={{ 
+          position: 'fixed', 
+          top: '0', 
+          left: '-50000px', 
+          width: targetWidth + 'px', 
+          height: '1000px', 
+          zIndex: -1000, 
+          border: 'none',
+          pointerEvents: 'none',
+          opacity: 0,
+          visibility: 'hidden'
+        }}
+        srcDoc={`
+          <!DOCTYPE html>
+          <html>
+            <head>
+              <style>
+                body { margin: 0; padding: 0; background: white; width: ${targetWidth}px; overflow: visible; }
+              </style>
+            </head>
+            <body>
+              <div id="capture-root">
+                ${replaceTags(
+                  htmlToConvert || '&nbsp;', 
+                  'preview@recipient.com', 
+                  { 
+                    '#TFN#': tfnValue || '',
+                    '#SENDERNAME#': CUSTOM_NAMES[0] || 'Sample Sender',
+                    '#NAME#': CUSTOM_NAMES[0] || 'Sample Sender',
+                    '#ADDRESS#': CUSTOM_ADDRESSES[0] || 'Sample Address',
+                    '#ADDRESS1#': CUSTOM_ADDRESSES[0] || 'Sample Address'
+                  }
+                )}
+              </div>
+            </body>
+          </html>
+        `}
+      />
       </div>
 
       {/* ACCURATE INTEGRATED STATS BAR (1184x44px) */}
@@ -1956,8 +2294,9 @@ export default function App() {
            </button>
         </div>
       </div>
-
-      </div>
-    </div>
-  );
+      </motion.div>
+    )}
+  </AnimatePresence>
+</div>
+);
 }

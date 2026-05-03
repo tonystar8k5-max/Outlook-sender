@@ -49,12 +49,8 @@ function startServer() {
 
 function createWindow() {
   const win = new BrowserWindow({
-    width: 1184,
-    height: 871,
-    minWidth: 1184,
-    minHeight: 871,
-    maxWidth: 1184,
-    maxHeight: 871,
+    width: 397,
+    height: 506,
     useContentSize: true,
     resizable: false,
     maximizable: false,
@@ -65,37 +61,45 @@ function createWindow() {
     },
     title: "Nexa outlook sender",
     backgroundColor: '#0a0a0a',
-    show: false
+    show: true
   });
 
   win.setMenuBarVisibility(false);
 
-  // Function to load the URL with retries
-  const loadWithRetry = (url, count = 0) => {
-    win.loadURL(url).then(() => {
-      win.show();
-    }).catch(() => {
-      if (count < 10) {
-        console.log(`Retrying connection to server (${count + 1}/10)...`);
-        setTimeout(() => loadWithRetry(url, count + 1), 2000);
-      } else {
-        // Final fallback: try local file if server never starts
-        win.loadFile(path.join(__dirname, 'dist/index.html'));
-        win.show();
-      }
-    });
-  };
+  // Handle manual resize requests from renderer
+  ipcMain.on('resize-window', (event, { width, height }) => {
+    if (win) {
+      win.setContentSize(width, height);
+      win.center();
+    }
+  });
 
   // Wait for server to potentially start
   if (isDev) {
     win.loadURL('http://localhost:3000');
-    win.show();
   } else {
-    // In production, give server time to boot
-    setTimeout(() => {
-      loadWithRetry('http://localhost:3000');
-    }, 5000);
+    // Production: Load local file immediately for instant UI
+    const indexPath = path.join(__dirname, 'dist/index.html');
+    win.loadFile(indexPath).catch(err => {
+      console.error('Failed to load local file:', err);
+      // Fallback to retry loop if file fails (maybe not built yet?)
+      const url = 'http://localhost:3000';
+      const loadWithRetry = (count = 0) => {
+        win.loadURL(url).then(() => {
+          win.show();
+          win.focus();
+        }).catch(() => {
+          if (count < 20) {
+            setTimeout(() => loadWithRetry(count + 1), 500);
+          }
+        });
+      };
+      loadWithRetry();
+    });
   }
+  
+  win.show();
+  win.focus();
 }
 
 app.whenReady().then(() => {
