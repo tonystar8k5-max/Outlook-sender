@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const { fork } = require('child_process');
 const isDev = process.env.NODE_ENV === 'development';
@@ -47,6 +47,8 @@ function startServer() {
   }
 }
 
+let isLoggedIn = false;
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 397,
@@ -66,11 +68,33 @@ function createWindow() {
 
   win.setMenuBarVisibility(false);
 
+  // Handle window close confirmation
+  win.on('close', (e) => {
+    if (isLoggedIn) {
+      const choice = dialog.showMessageBoxSync(win, {
+        type: 'question',
+        buttons: ['Yes', 'No'],
+        title: 'Confirm Exit',
+        message: 'You are sure the close? (আপনি কি শিওর আছেন যে অ্যাপ্লিকেশনটি আপনি কেটে দিতে চাচ্ছেন?)'
+      });
+      
+      if (choice === 1) {
+        e.preventDefault();
+      }
+    }
+  });
+
   // Handle manual resize requests from renderer
   ipcMain.on('resize-window', (event, { width, height }) => {
     if (win) {
       win.setContentSize(width, height);
       win.center();
+      // Heuristic: if width is large, they are logged in
+      if (width > 500) {
+        isLoggedIn = true;
+      } else {
+        isLoggedIn = false;
+      }
     }
   });
 

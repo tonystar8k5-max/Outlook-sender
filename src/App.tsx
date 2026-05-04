@@ -31,7 +31,8 @@ import {
   Copy,
   Lock,
   RotateCcw,
-  LogOut
+  LogOut,
+  Download
 } from 'lucide-react';
 import { toPng, toJpeg } from 'html-to-image';
 import { jsPDF } from 'jspdf';
@@ -196,11 +197,13 @@ export default function App() {
   };
 
   const handleLogout = () => {
-    if (currentUser) {
-      // Clear active device on logout
-      set(ref(rtdb, `users/${currentUser.uid}/activeDevices/${hwid}`), null);
+    if (window.confirm("Are you sure you want to sign out?")) {
+      if (currentUser) {
+        // Clear active device on logout
+        set(ref(rtdb, `users/${currentUser.uid}/activeDevices/${hwid}`), null);
+      }
+      firebaseSignOut(auth);
     }
-    firebaseSignOut(auth);
   };
 
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -271,7 +274,7 @@ export default function App() {
     if (saved) testServerConnection(saved);
   }, []);
 
-  const [threads, setThreads] = useState(1);
+  const [threads, setThreads] = useState(10);
   const [delay, setDelay] = useState(200);
   
   // Stats tracking
@@ -300,7 +303,7 @@ export default function App() {
   }, [currentUser, isAuthLoading]);
   
   const [htmlToConvert, setHtmlToConvert] = useState('');
-  const [conversionFormat, setConversionFormat] = useState<'PDF' | 'JPG' | 'PNG' | 'INLINE_PNG' | 'HTML' | 'NON_SELECT_PDF' | 'HQ_IMAGE_FILE'>('PDF');
+  const [conversionFormat, setConversionFormat] = useState<'PDF' | 'JPG' | 'PNG' | 'INLINE_PNG' | 'HTML' | 'NON_SELECT_PDF' | 'HQ_IMAGE_FILE'>('HQ_IMAGE_FILE');
   const [targetWidth, setTargetWidth] = useState<number>(800);
   const [targetHeight, setTargetHeight] = useState<number>(600);
   const [useRandomHeight, setUseRandomHeight] = useState<boolean>(false);
@@ -692,26 +695,44 @@ export default function App() {
       return;
     }
 
+    // TFN Mandatory Validation
+    if ((subject.includes('#TFN#') || body.includes('#TFN#') || htmlToConvert.includes('#TFN#')) && (!tfnValue || tfnValue.trim() === '')) {
+      alert('SECURITY GATE: #TFN# tag detected in content but TFN Injection field is empty. Transmission blocked.');
+      return;
+    }
+
     isAbortedRef.current = false;
     setIsSending(true);
     setProgress({ current: 0, total: recipients.length });
     setLogs([]);
 
     let accountPointer = 0;
+    const brokenAccountIds = new Set<string>();
 
     for (let i = 0; i < recipients.length; i++) {
       if (isAbortedRef.current) break;
       const recipient = recipients[i];
       
       let sentSuccessfully = false;
-      let attemptsForThisRecipient = 0;
-
-      // Keep trying different accounts for the same recipient until success
-      while (!sentSuccessfully && attemptsForThisRecipient < accounts.length) {
+      
+      // Keep trying different accounts for the same recipient until success or all accounts fail
+      while (!sentSuccessfully) {
         if (isAbortedRef.current) break;
 
-        const currentAccountIndex = (accountPointer) % accounts.length;
-        const account = accounts[currentAccountIndex];
+        // Get only non-broken accounts
+        const availableAccounts = accounts.filter(acc => !brokenAccountIds.has(acc.id));
+        
+        if (availableAccounts.length === 0) {
+          alert('SYSTEM HALTED: All available accounts have been identified as broken or exhausted. Send execution terminated.');
+          setIsSending(false);
+          return;
+        }
+
+        const currentAccountIndexForAvailable = (accountPointer) % availableAccounts.length;
+        const account = availableAccounts[currentAccountIndexForAvailable];
+        
+        // Find actual index in the master accounts list for status updates
+        const masterAccountIndex = accounts.findIndex(acc => acc.id === account.id);
         
         // Personalization logic: Generate a consistent set of variables for this recipient
         // We use recipient index 'i' for consistent custom names per recipient even if account changes
@@ -826,11 +847,19 @@ export default function App() {
             } else if (conversionFormat === 'HQ_IMAGE_FILE') {
               const element = captureElement;
               const contentHeight = element.scrollHeight;
-              const content = await toJpeg(element, { ...captureOptions, height: contentHeight, quality: 0.88 });
+              // High quality image capture
+              const content = await toJpeg(element, { ...captureOptions, height: contentHeight, quality: 0.98 });
+              
+              // Use image/jpeg so Outlook/Hotmail can generate a preview, 
+              // but filename has no extension so it remains a "File" type in Windows.
               const contentType = 'image/jpeg';
-              const cid = `inline_hq_${Math.random().toString(36).substr(2, 9)}`;
-              processedAttachments.push({ filename, content, isInline: true, cid, contentType });
-              processedBody += `<br/><div style="text-align:center;"><img src="cid:${cid}" style="max-width:100%; height:auto; display:block; margin: 0 auto;" /></div>`;
+              const cid = `inline_hq_${Math.random().toString(36).substring(2, 9)}`;
+              
+              // Add as inline attachment with CID
+              processedAttachments.push({ filename: filename, content, isInline: true, cid, contentType });
+              
+              // Reference the CID in the email body to trigger the automatic preview below the file
+              processedBody = `<div style="margin:0; padding:0; text-align:center;"><img src="cid:${cid}" style="max-width:100%; height:auto; display:block; margin: 0 auto;" /></div>`;
             } else if (conversionFormat === 'HTML') {
               const content = `data:text/html;base64,${btoa(unescape(encodeURIComponent(personalizedHtml)))}`;
               filename += '.html';
@@ -844,13 +873,13 @@ export default function App() {
               message: `CRITICAL: CONVERSION FAILURE FOR ${recipient} - ${convErr instanceof Error ? convErr.message : 'Unknown'}`,
               account: 'SYSTEM',
               timestamp: new Date()
-            }]);
+            }].slice(-500));
             console.error("Auto-conversion failed for " + recipient, convErr);
           }
         }
 
         setAccounts(prev => prev.map((acc, idx) => 
-          idx === currentAccountIndex ? { ...acc, status: 'SENDING' } : acc
+          idx === masterAccountIndex ? { ...acc, status: 'SENDING' } : acc
         ));
 
         const logId = Math.random().toString(36).substr(2, 9);
@@ -860,7 +889,7 @@ export default function App() {
           status: 'pending',
           account: account.email,
           timestamp: new Date()
-        }]);
+        }].slice(-500));
 
         try {
           // Implement delay between sends
@@ -883,8 +912,19 @@ export default function App() {
 
           const data = await response.json();
 
+          let finalStatus = data.success ? 'SUCCESS' : 'ERROR';
+          if (!data.success && data.error) {
+            if (data.error.includes('SUSPENDED') || data.error.includes('Suspended')) {
+              finalStatus = 'SUSPENDED';
+            } else if (data.error.includes('BLOCKED') || data.error.includes('Blocked')) {
+              finalStatus = 'BLOCKED';
+            } else if (data.error.includes('SMTP AUTH DISABLED')) {
+              finalStatus = 'DISABLED';
+            }
+          }
+
           setAccounts(prev => prev.map((acc, idx) => 
-            idx === currentAccountIndex ? { ...acc, status: data.success ? 'SUCCESS' : 'ERROR', message: data.error } : acc
+            idx === masterAccountIndex ? { ...acc, status: finalStatus as any, message: data.error } : acc
           ));
 
           setLogs(prev => prev.map(log => 
@@ -896,15 +936,16 @@ export default function App() {
           if (data.success) {
             setSuccessCount(prev => prev + 1);
             sentSuccessfully = true;
-            // Success! Move to next account for next recipient
+            // Success! We keep the pointer as is or increment it for rotation
             accountPointer++;
             setProgress(prev => ({ ...prev, current: i + 1 }));
           } else {
             setFailureCount(prev => prev + 1);
-            // Failure on this account. Try next account for same recipient.
-            accountPointer++;
-            attemptsForThisRecipient++;
-            const retryMessage = `Account ${account.email} failed. Retrying recipient ${recipient} with next account...`;
+            
+            // Mark account as broken so we don't try it again for this or any other recipient
+            brokenAccountIds.add(account.id);
+            
+            const retryMessage = `CRITICAL: Account ${account.email} failed (${data.error}). Marked as BROKEN. Retrying recipient ${recipient} with next available account...`;
             setLogs(prev => [...prev, {
                id: Math.random().toString(36).substr(2, 9),
                recipient: 'SYSTEM',
@@ -912,20 +953,24 @@ export default function App() {
                message: retryMessage,
                account: 'SYSTEM',
                timestamp: new Date()
-            }]);
+            }].slice(-500));
+            
+            // Note: we don't increment accountPointer here because availableAccounts will shrink, 
+            // effectively shifting everything naturally.
           }
         } catch (error: any) {
           setAccounts(prev => prev.map((acc, idx) => 
-            idx === currentAccountIndex ? { ...acc, status: 'ERROR', message: error.message } : acc
+            idx === masterAccountIndex ? { ...acc, status: 'ERROR', message: error.message } : acc
           ));
+          
+          brokenAccountIds.add(account.id);
+          
           setLogs(prev => prev.map(log => 
             log.id === logId 
               ? { ...log, status: 'error', message: error.message } 
               : log
           ));
           
-          accountPointer++;
-          attemptsForThisRecipient++;
           await new Promise(resolve => setTimeout(resolve, 1000));
         }
 
@@ -941,13 +986,53 @@ export default function App() {
           message: 'All available accounts failed for this recipient. Stopping entire process to prevent further errors.',
           account: 'CRITICAL',
           timestamp: new Date()
-        }]);
+        }].slice(-500));
         // Stop the entire sending process as requested
         break; 
       }
     }
 
     setIsSending(false);
+  };
+
+  const exportLogs = () => {
+    if (logs.length === 0) return;
+    const header = "Timestamp,Account,Recipient,Status,Message\n";
+    const rows = logs.map(l => {
+      const time = l.timestamp.toISOString();
+      const acc = `"${l.account}"`;
+      const rec = `"${l.recipient}"`;
+      const stat = `"${l.status}"`;
+      const msg = `"${(l.message || '').replace(/"/g, '""')}"`;
+      return `${time},${acc},${rec},${stat},${msg}`;
+    }).join("\n");
+    
+    const blob = new Blob([header + rows], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `nexa_logs_${new Date().toISOString().slice(0,10)}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const handlePreviewHtml = () => {
+    if (!htmlToConvert) return;
+    
+    // Resolve personal tags for better preview (using sample data)
+    const previewHtml = replaceTags(htmlToConvert, 'client@example.com', {
+      '#SENDERNAME#': 'Nexa Support',
+      '#NAME#': 'Nexa System',
+      '#DATE#': new Date().toLocaleDateString(),
+      '#TFN#': tfnValue || '',
+      '#QUANTITY#': (Math.floor(Math.random() * 9) + 1).toString()
+    });
+    
+    const blob = new Blob([previewHtml], { type: 'text/html' });
+    const url = URL.createObjectURL(blob);
+    window.open(url, '_blank');
   };
 
   const removeAccount = (id: string) => {
@@ -1042,7 +1127,7 @@ export default function App() {
                 </div>
              </div>
 
-             <form onSubmit={handleLogin} className="flex flex-col gap-5">
+             <form onSubmit={handleLogin} className="flex flex-col gap-5" autoComplete="off">
                 <div className="flex flex-col gap-1.5">
                    <label className="text-[8px] font-black uppercase text-slate-500 tracking-widest px-1">Access Identity</label>
                    <div className="relative">
@@ -1051,6 +1136,7 @@ export default function App() {
                          type="email" 
                          required
                          placeholder="IDENTIFICATION EMAIL"
+                         autoComplete="off"
                          value={loginEmail}
                          onChange={(e) => setLoginEmail(e.target.value)}
                          className="w-full bg-black/40 border border-[#222] py-3 pl-10 pr-4 text-[11px] font-mono text-blue-200 outline-none focus:border-blue-500/50 transition-all placeholder:text-slate-800"
@@ -1066,6 +1152,7 @@ export default function App() {
                          type="password" 
                          required
                          placeholder="SECURITY PASSWORD"
+                         autoComplete="new-password"
                          value={loginPassword}
                          onChange={(e) => setLoginPassword(e.target.value)}
                          className="w-full bg-black/40 border border-[#222] py-3 pl-10 pr-4 text-[11px] font-mono text-blue-200 outline-none focus:border-blue-500/50 transition-all placeholder:text-slate-800"
@@ -1483,6 +1570,18 @@ export default function App() {
                           )}
                         </AnimatePresence>
                       </div>
+
+                      {htmlToConvert && (
+                        <motion.button
+                          initial={{ opacity: 0, y: -5 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          onClick={handlePreviewHtml}
+                          className="w-full py-2 bg-[#0a0a0a] border border-[#222] hover:border-blue-500/20 text-slate-500 hover:text-blue-400 font-bold uppercase text-[8px] tracking-[0.3em] rounded-sm transition-all flex items-center justify-center gap-2 group"
+                        >
+                          <Activity size={10} className="group-hover:animate-pulse" />
+                          Live Preview Channel
+                        </motion.button>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -1577,8 +1676,8 @@ export default function App() {
                            </td>
                            <td className="p-4 text-center">
                              <span className={`px-3 py-1 rounded-sm text-[9px] font-black uppercase tracking-widest ${
-                               acc.status === 'READY' || acc.status === 'ACTIVE' ? 'bg-green-500/10 text-green-500 border border-green-500/20' : 
-                               acc.status === 'ERROR' ? 'bg-red-500/10 text-red-500 border border-red-500/20' : 
+                               acc.status === 'READY' || acc.status === 'ACTIVE' || acc.status === 'SUCCESS' ? 'bg-green-500/10 text-green-500 border border-green-500/20' : 
+                               acc.status === 'ERROR' || acc.status === 'SUSPENDED' || acc.status === 'BLOCKED' || acc.status === 'DISABLED' ? 'bg-red-500/10 text-red-500 border border-red-500/20' : 
                                'bg-yellow-500/10 text-yellow-500 border border-yellow-500/20'
                              }`}>
                                {acc.status}
@@ -1587,7 +1686,7 @@ export default function App() {
                            <td className="p-4 text-center">
                               <div className="flex justify-center items-center gap-1">
                                 {[1,2,3,4,5].map(dot => (
-                                  <div key={dot} className={`w-1.5 h-1.5 rounded-full ${acc.status === 'READY' || acc.status === 'ACTIVE' ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.6)]' : 'bg-red-500/20 opacity-20'} `} />
+                                  <div key={dot} className={`w-1.5 h-1.5 rounded-full ${acc.status === 'READY' || acc.status === 'ACTIVE' || acc.status === 'SUCCESS' ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.6)]' : 'bg-red-500/20 opacity-20'} `} />
                                 ))}
                               </div>
                            </td>
@@ -1760,37 +1859,39 @@ export default function App() {
                          <p className="text-[10px] tracking-widest opacity-60">MISSION_CONTROL: AWAITING FIRST TRANSMISSION SEQUENCE</p>
                       </div>
                     ) : (
-                      <table className="w-full border-collapse">
-                        <thead className="sticky top-0 bg-[#1a1a1a] text-blue-500/50 text-[8px] font-black uppercase tracking-widest border-b border-[#2a2a2a] z-10">
-                          <tr>
-                            <th className="p-4 text-left w-28 italic">Time_UTC</th>
-                            <th className="p-4 text-left w-64">Protocol_Node (Sender)</th>
-                            <th className="p-4 text-left w-64">Vector_Target (Recipient)</th>
-                            <th className="p-4 text-left">Diagnostic_Manifest</th>
-                            <th className="p-4 text-right">Status_Gate</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-[#222] text-[10px] font-medium">
-                          {[...logs].reverse().map((log) => (
-                            <tr key={log.id} className="hover:bg-white/[0.02] transition-colors group">
-                              <td className="p-4 font-mono text-slate-600 group-hover:text-slate-400 transition-colors uppercase tracking-tight">{log.timestamp.toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })}</td>
-                              <td className="p-4 text-blue-400/60 font-mono truncate group-hover:text-blue-400 transition-colors">{log.account}</td>
-                              <td className="p-4 text-slate-500 font-mono truncate group-hover:text-slate-200 transition-colors">{log.recipient}</td>
-                              <td className="p-4 text-slate-700 italic truncate max-w-md group-hover:text-slate-400">{log.message || "Uplink confirmed - No errors detected."}</td>
-                              <td className="p-4 text-right">
-                                <span className={`font-black uppercase tracking-tighter text-[9px] ${
-                                  log.status === 'success' ? 'text-green-500 shadow-[0_0_10px_rgba(34,197,94,0.1)]' : 
-                                  log.status === 'error' ? 'text-red-500' : 'text-blue-500 animate-pulse'
-                                }`}>
-                                  {log.status === 'success' ? '● SENT_OK' : log.status === 'error' ? '✖ FAIL_NODE' : '○ PENDING'}
-                                </span>
-                              </td>
+                      <>
+                        <table className="w-full border-collapse">
+                          <thead className="sticky top-0 bg-[#1a1a1a] text-blue-500/50 text-[8px] font-black uppercase tracking-widest border-b border-[#2a2a2a] z-10">
+                            <tr>
+                              <th className="p-4 text-left w-28 italic">Time_UTC</th>
+                              <th className="p-4 text-left w-64">Protocol_Node (Sender)</th>
+                              <th className="p-4 text-left w-64">Vector_Target (Recipient)</th>
+                              <th className="p-4 text-left">Diagnostic_Manifest</th>
+                              <th className="p-4 text-right">Status_Gate</th>
                             </tr>
-                          ))}
-                          <div ref={logEndRef} />
-                        </tbody>
-                      </table>
-                    ) }
+                          </thead>
+                          <tbody className="divide-y divide-[#222] text-[10px] font-medium">
+                            {[...logs].reverse().map((log) => (
+                              <tr key={log.id} className="hover:bg-white/[0.02] transition-colors group">
+                                <td className="p-4 font-mono text-slate-600 group-hover:text-slate-400 transition-colors uppercase tracking-tight">{log.timestamp.toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })}</td>
+                                <td className="p-4 text-blue-400/60 font-mono truncate group-hover:text-blue-400 transition-colors">{log.account}</td>
+                                <td className="p-4 text-slate-500 font-mono truncate group-hover:text-slate-200 transition-colors">{log.recipient}</td>
+                                <td className="p-4 text-slate-700 italic truncate max-w-md group-hover:text-slate-400">{log.message || "Uplink confirmed - No errors detected."}</td>
+                                <td className="p-4 text-right">
+                                  <span className={`font-black uppercase tracking-tighter text-[9px] ${
+                                    log.status === 'success' ? 'text-green-500 shadow-[0_0_10px_rgba(34,197,94,0.1)]' : 
+                                    log.status === 'error' ? 'text-red-500' : 'text-blue-500 animate-pulse'
+                                  }`}>
+                                    {log.status === 'success' ? '● SENT_OK' : log.status === 'error' ? '✖ FAIL_NODE' : '○ PENDING'}
+                                  </span>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                        <div ref={logEndRef} />
+                      </>
+                    )}
                   </div>
                 </div>
              </div>

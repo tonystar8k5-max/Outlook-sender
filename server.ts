@@ -144,8 +144,24 @@ async function startServer() {
       res.json({ success: false, error: "Auth payload failed. Ensure your Refresh Token and Client ID are correct." });
     } catch (error: any) {
       let errorMessage = error.message || "Verification failed";
-      if (errorMessage.includes("SmtpClientAuthentication is disabled")) {
-        errorMessage = "SMTP AUTH DISABLED";
+      
+      // Safer way to stringify error for pattern matching
+      const rawError = `${error.message || ''} ${error.code || ''} ${error.stack || ''} ${JSON.stringify(error, Object.getOwnPropertyNames(error))}`;
+      
+      if (errorMessage.includes("SmtpClientAuthentication is disabled") || errorMessage.includes("535 5.7.139") || rawError.includes("535 5.7.139")) {
+        errorMessage = "SMTP AUTH DISABLED: Please enable 'Authenticated SMTP' in your Microsoft/Outlook admin center or mailbox settings.";
+      } else if (errorMessage.includes("ACCOUNT_BLOCKED_ABUSE") || rawError.includes("ACCOUNT_BLOCKED_ABUSE") || rawError.includes("abuse")) {
+        errorMessage = "ACCOUNT BLOCKED: This account has been flagged for abuse by Microsoft. Please sign in to the Outlook web portal to unblock it.";
+      } else if (rawError.includes("ErrorAccountSuspend") || rawError.includes("Account suspended")) {
+        errorMessage = "ACCOUNT SUSPENDED: Microsoft has suspended this account. Sign in via web to verify identity.";
+      } else if (errorMessage.includes("429") || errorMessage.includes("Too Many Requests")) {
+        errorMessage = "RATE LIMITED: Microsoft has temporarily throttled this account. Increase delay between sends.";
+      }
+      if (errorMessage.includes("554 5.2.2") || errorMessage.includes("QuotaExceeded")) {
+        errorMessage = "MAILBOX FULL: The recipient or sender mailbox is full.";
+      }
+      if (errorMessage.includes("550 5.1.8") || errorMessage.includes("Access denied, tenant has exceeded threshold")) {
+        errorMessage = "OUTBOUND BLOCKED: Your account/tenant has exceeded outbound volume limits. Wait 24h.";
       }
       res.json({ success: false, error: errorMessage });
     }
@@ -197,8 +213,19 @@ async function startServer() {
     if (attachments && Array.isArray(attachments)) {
       attachments.forEach((att: any, index: number) => {
         let base64Part = att.content;
+        
+        // Skip empty or invalid data URIs that would cause Graph API to fail
+        if (!base64Part || base64Part === 'data:,' || base64Part.length < 10) {
+          console.warn(`Skipping invalid attachment: ${att.filename}`);
+          return;
+        }
+
         if (base64Part.includes('base64,')) {
           base64Part = base64Part.split('base64,')[1];
+        } else if (base64Part.startsWith('data:')) {
+          // If it's a data URI but doesn't have 'base64,' (like 'data:text/plain,hello')
+          // OR if it's just 'data:,', it's invalid for this context
+          return;
         }
         
         mailAttachments.push({
@@ -224,7 +251,11 @@ async function startServer() {
     // Prepare API attachments
     const getBase64 = (content: any) => {
       if (Buffer.isBuffer(content)) return content.toString('base64');
-      if (typeof content === 'string') return content;
+      if (typeof content === 'string') {
+        // Double check for any lingering data URI prefix
+        if (content.includes('base64,')) return content.split('base64,')[1];
+        return content;
+      }
       return '';
     };
 
@@ -338,9 +369,13 @@ async function startServer() {
       console.error(`Error sending from ${email}:`, error);
       
       let errorMessage = error.message || "Failed to send email";
-      if (errorMessage === "ACCOUNT_BLOCKED_ABUSE") {
+      const rawError = `${error.message || ''} ${error.code || ''} ${error.stack || ''} ${JSON.stringify(error, Object.getOwnPropertyNames(error))}`;
+
+      if (errorMessage === "ACCOUNT_BLOCKED_ABUSE" || rawError.includes("ACCOUNT_BLOCKED_ABUSE") || rawError.includes("abuse")) {
         errorMessage = "ACCOUNT BLOCKED: Service Abuse Mode. This mailbox has been suspended by Microsoft.";
-      } else if (errorMessage.includes("SmtpClientAuthentication is disabled") || errorMessage.includes("535 5.7.139")) {
+      } else if (rawError.includes("ErrorAccountSuspend") || rawError.includes("Account suspended")) {
+        errorMessage = "ACCOUNT SUSPENDED: Microsoft has suspended this account. Manual verification required in web browser.";
+      } else if (errorMessage.includes("SmtpClientAuthentication is disabled") || errorMessage.includes("535 5.7.139") || rawError.includes("535 5.7.139")) {
         errorMessage = "SMTP AUTH DISABLED: Please enable 'Authenticated SMTP' in your Microsoft/Outlook settings for this mailbox. Visit https://aka.ms/smtp_auth_disabled for instructions.";
       }
 
